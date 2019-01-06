@@ -47,28 +47,18 @@ const u32 ZBITS     = YZBITS - YBITS;
 const u32 NZ        = 1 << ZBITS;
 const u32 ZMASK     = NZ - 1;
 
-#ifndef NEPS_A
-#define NEPS_A 133
+#ifndef EPS_A
+#define EPS_A 133/128
 #endif
-#ifndef NEPS_B
-#define NEPS_B 88
+#ifndef EPS_B
+#define EPS_B 85/128
 #endif
-#define NEPS 128
 
-const u32 EDGES_A = NZ * NEPS_A / NEPS;
-const u32 EDGES_B = NZ * NEPS_B / NEPS;
+const u32 EDGES_A = NZ * EPS_A;
+const u32 EDGES_B = NZ * EPS_B;
  
 const u32 ROW_EDGES_A = EDGES_A * NY;
 const u32 ROW_EDGES_B = EDGES_B * NY;
-
-// Number of Parts of BufferB, all but one of which will overlap BufferA
-#ifndef NB
-#define NB 2
-#endif
-
-#ifndef NA
-#define NA  ((NB * NEPS_A + NEPS_B-1) / NEPS_B)
-#endif
 
 __constant__ uint2 recoveredges[PROOFSIZE];
 __constant__ uint2 e0 = {0,0};
@@ -254,8 +244,8 @@ __device__ __forceinline__  bool Read2bCounter(u32 *ecounters, const int bucket)
   return (ecounters[word + NZ/32] >> bit) & 1;
 }
 
-template<int NP, int maxIn, int maxOut>
-__global__ void Round(const int round, const uint2 * __restrict__ src, uint2 * __restrict__ dst, const int * __restrict__ srcIdx, int * __restrict__ dstIdx) {
+template<int maxIn, int maxOut>
+__global__ void Round(const int round, const uint2 * __restrict__ source, uint2 * __restrict__ destination, const int * __restrict__ sourceIndexes, int * __restrict__ destinationIndexes) {
   const int group = blockIdx.x;
   const int dim = blockDim.x;
   const int lid = threadIdx.x;
@@ -266,79 +256,39 @@ __global__ void Round(const int round, const uint2 * __restrict__ src, uint2 * _
   for (int i = lid; i < COUNTERWORDS; i += dim)
     ecounters[i] = 0;
   __syncthreads();
-
-#if 0
-  const int edgesInBucket = min(srcIdx[group], maxIn);
+  const int edgesInBucket = min(sourceIndexes[group], maxIn);
+#ifdef SYNCBUG
+  if (group==0xad6 && lid==0) printf("round %d group %03x edges %d\n", round, group, edgesInBucket);
+#endif
   const int loops = (edgesInBucket + dim-1) / dim;
 
   for (int loop = 0; loop < loops; loop++) {
     const int lindex = loop * dim + lid;
     if (lindex < edgesInBucket) {
       const int index = maxIn * group + lindex;
-      uint2 edge = __ldg(&src[index]);
+      uint2 edge = __ldg(&source[index]);
       if (null(edge)) continue;
       u32 node = endpoint(edge, round&1);
       Increase2bCounter(ecounters, node & ZMASK);
     }
   }
-#endif
-  for (int i = 0; i < NP; i++, src += NX2 * maxIn, srcIdx += NX2) {
-    const int edgesInBucket = min(srcIdx[group], maxIn);
-    // if (!group && !lid) printf("round %d size  %d\n", round, edgesInBucket);
-    const int loops = (edgesInBucket + dim-1) / dim;
-
-    for (int loop = 0; loop < loops; loop++) {
-      const int lindex = loop * dim + lid;
-      if (lindex < edgesInBucket) {
-        const int index = maxIn * group + lindex;
-        uint2 edge = __ldg(&src[index]);
-        if (null(edge)) continue;
-        u32 node = endpoint(edge, round&1);
-        Increase2bCounter(ecounters, node & ZMASK);
-      }
-    }
-  }
-
   __syncthreads();
-
-#if 0
   for (int loop = 0; loop < loops; loop++) {
     const int lindex = loop * dim + lid;
     if (lindex < edgesInBucket) {
       const int index = maxIn * group + lindex;
-      uint2 edge = __ldg(&src[index]);
+      uint2 edge = __ldg(&source[index]);
       if (null(edge)) continue;
       u32 node0 = endpoint(edge, round&1);
       if (Read2bCounter(ecounters, node0 & ZMASK)) {
         u32 node1 = endpoint(edge, (round&1)^1);
         const int bucket = node1 >> ZBITS;
-        const int bktIdx = min(atomicAdd(dstIdx + bucket, 1), maxOut - 1);
-        dst[bucket * maxOut + bktIdx] = (round&1) ? make_uint2(node1, node0) : make_uint2(node0, node1);
+        const int bktIdx = min(atomicAdd(destinationIndexes + bucket, 1), maxOut - 1);
+        destination[bucket * maxOut + bktIdx] = (round&1) ? make_uint2(node1, node0) : make_uint2(node0, node1);
       }
     }
   }
-  // if (group==0&&lid==0) printf("round %d cnt(0,0) %d\n", round, srcIdx[0]);
-#endif
-  src -= NP * NX2 * maxIn; srcIdx -= NP * NX2;
-  for (int i = 0; i < NP; i++, src += NX2 * maxIn, srcIdx += NX2) {
-    const int edgesInBucket = min(srcIdx[group], maxIn);
-    const int loops = (edgesInBucket + dim-1) / dim;
-    for (int loop = 0; loop < loops; loop++) {
-      const int lindex = loop * dim + lid;
-      if (lindex < edgesInBucket) {
-        const int index = maxIn * group + lindex;
-        uint2 edge = __ldg(&src[index]);
-        if (null(edge)) continue;
-        u32 node0 = endpoint(edge, round&1);
-        if (Read2bCounter(ecounters, node0 & ZMASK)) {
-          u32 node1 = endpoint(edge, (round&1)^1);
-          const int bucket = node1 >> ZBITS;
-          const int bktIdx = min(atomicAdd(dstIdx + bucket, 1), maxOut - 1);
-          dst[bucket * maxOut + bktIdx] = (round&1) ? make_uint2(node1, node0) : make_uint2(node0, node1);
-        }
-      }
-    }
-  }
+  // if (group==0&&lid==0) printf("round %d cnt(0,0) %d\n", round, sourceIndexes[0]);
 }
 
 template<int maxIn>
@@ -438,10 +388,11 @@ struct edgetrimmer {
   edgetrimmer *dt;
   size_t sizeA, sizeB;
   const size_t indexesSize = NX * NY * sizeof(u32);
-  u8 *bufferA;
-  u8 *bufferB;
-  u8 *bufferAB;
-  int *indexesE[1+NB];
+  ulonglong4 *bufferA;
+  ulonglong4 *bufferB;
+  ulonglong4 *bufferAB;
+  int *indexesE;
+  int *indexesE2;
   u32 nedges;
   u32 *uvnodes;
   siphash_keys sipkeys, *dipkeys;
@@ -452,28 +403,24 @@ struct edgetrimmer {
     checkCudaErrors_V(cudaMalloc((void**)&dt, sizeof(edgetrimmer)));
     checkCudaErrors_V(cudaMalloc((void**)&uvnodes, PROOFSIZE * 2 * sizeof(u32)));
     checkCudaErrors_V(cudaMalloc((void**)&dipkeys, sizeof(siphash_keys)));
-    for (int i = 0; i < 1+NB; i++) {
-      checkCudaErrors_V(cudaMalloc((void**)&indexesE[i], indexesSize));
-    }
+    checkCudaErrors_V(cudaMalloc((void**)&indexesE, indexesSize));
+    checkCudaErrors_V(cudaMalloc((void**)&indexesE2, indexesSize));
     sizeA = ROW_EDGES_A * NX * sizeof(uint2);
     sizeB = ROW_EDGES_B * NX * sizeof(uint2);
-    const size_t bufferSize = sizeA + sizeB / NB;
-    assert(bufferSize >= sizeB + sizeB / NB / 2); // ensure enough space for Round 1
+    const size_t bufferSize = sizeA + sizeB;
     checkCudaErrors_V(cudaMalloc((void**)&bufferA, bufferSize));
-    bufferAB = bufferA + sizeB / NB;
-    bufferB  = bufferA + bufferSize - sizeB;
-    assert(bufferA + sizeA == bufferB + sizeB * (NB-1) / NB); // ensure alignment of overlap
+    bufferB  = bufferA + sizeA / sizeof(ulonglong4);
+    bufferAB = bufferA + sizeB / sizeof(ulonglong4);
     cudaMemcpy(dt, this, sizeof(edgetrimmer), cudaMemcpyHostToDevice);
     initsuccess = true;
   }
   u64 globalbytes() const {
-    return (sizeA+sizeB/NB) + (1+NB) * indexesSize + sizeof(siphash_keys) + PROOFSIZE * 2 * sizeof(u32) + sizeof(edgetrimmer);
+    return (sizeA+sizeB) + 2 * indexesSize + sizeof(siphash_keys) + PROOFSIZE * 2 * sizeof(u32) + sizeof(edgetrimmer);
   }
   ~edgetrimmer() {
     checkCudaErrors_V(cudaFree(bufferA));
-        for (int i = 0; i < 1+NB; i++) {
-      checkCudaErrors_V(cudaFree(indexesE[i]));
-    }
+    checkCudaErrors_V(cudaFree(indexesE2));
+    checkCudaErrors_V(cudaFree(indexesE));
     checkCudaErrors_V(cudaFree(dipkeys));
     checkCudaErrors_V(cudaFree(uvnodes));
     checkCudaErrors_V(cudaFree(dt));
@@ -482,29 +429,27 @@ struct edgetrimmer {
   u32 trim() {
     cudaEvent_t start, stop;
     checkCudaErrors(cudaEventCreate(&start)); checkCudaErrors(cudaEventCreate(&stop));
+  
+    cudaMemset(indexesE, 0, indexesSize);
+    cudaMemset(indexesE2, 0, indexesSize);
     cudaMemcpy(dipkeys, &sipkeys, sizeof(sipkeys), cudaMemcpyHostToDevice);
   
     cudaDeviceSynchronize();
     float durationA, durationB;
     cudaEventRecord(start, NULL);
   
-    cudaMemset(indexesE[1], 0, indexesSize);
-
-    SeedA<EDGES_A><<<tp.genA.blocks, tp.genA.tpb>>>(*dipkeys, (ulonglong4*)bufferAB, (int *)indexesE[1]);
+    SeedA<EDGES_A><<<tp.genA.blocks, tp.genA.tpb>>>(*dipkeys, bufferAB, (int *)indexesE);
   
     checkCudaErrors(cudaDeviceSynchronize()); cudaEventRecord(stop, NULL);
     cudaEventSynchronize(stop); cudaEventElapsedTime(&durationA, start, stop);
     if (abort) return false;
     cudaEventRecord(start, NULL);
   
-    cudaMemset(indexesE[0], 0, indexesSize);
-
-    u32 qA = sizeA/NA;
-    u32 qE = NX2 / NA;
-    for (u32 i = 0; i < NA; i++) {
-      SeedB<EDGES_A><<<tp.genB.blocks/NA, tp.genB.tpb>>>((uint2*)(bufferAB+i*qA), (ulonglong4*)(bufferA+i*qA), (indexesE[1]+i*qE), indexesE[0]+i*qE);
-      if (abort) return false;
-    }
+    const u32 halfA = sizeA/2 / sizeof(ulonglong4);
+    const u32 halfE = NX2 / 2;
+    SeedB<EDGES_A><<<tp.genB.blocks/2, tp.genB.tpb>>>((const uint2 *)bufferAB, bufferA, (const int *)indexesE, indexesE2);
+    if (abort) return false;
+    SeedB<EDGES_A><<<tp.genB.blocks/2, tp.genB.tpb>>>((const uint2 *)(bufferAB+halfA), bufferA+halfA, (const int *)(indexesE+halfE), indexesE2+halfE);
 
     checkCudaErrors(cudaDeviceSynchronize()); cudaEventRecord(stop, NULL);
     cudaEventSynchronize(stop); cudaEventElapsedTime(&durationB, start, stop);
@@ -512,47 +457,40 @@ struct edgetrimmer {
     print_log("Seeding completed in %.0f + %.0f ms\n", durationA, durationB);
     if (abort) return false;
   
-    for (u32 i = 0; i < NB; i++) cudaMemset(indexesE[1+i], 0, indexesSize);
+    cudaMemset(indexesE, 0, indexesSize);
 
-    qA = sizeA/NB;
-    const size_t qB = sizeB/NB;
-    qE = NX2 / NB;
-    for (u32 i = NB; i--; ) {
-      Round<1, EDGES_A, EDGES_B/NB><<<tp.trim.blocks/NB, tp.trim.tpb>>>(0, (uint2*)(bufferA+i*qA), (uint2*)(bufferB+i*qB), indexesE[0]+i*qE, (int *)indexesE[1+i]); // to .632
-      if (abort) return false;
-    }
-
-    cudaMemset(indexesE[0], 0, indexesSize);
-
-    Round<NB, EDGES_B/NB, EDGES_B/2><<<tp.trim.blocks, tp.trim.tpb>>>(1, (const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]); // to .296
+    Round<EDGES_A, EDGES_B><<<tp.trim.blocks, tp.trim.tpb>>>(0, (const uint2 *)bufferA, (uint2 *)bufferB, (const int *)indexesE2, (int *)indexesE); // to .632
+    cudaDeviceSynchronize();
     if (abort) return false;
 
-    cudaMemset(indexesE[1], 0, indexesSize);
+    cudaMemset(indexesE2, 0, indexesSize);
 
-    Round<1, EDGES_B/2, EDGES_A/4><<<tp.trim.blocks, tp.trim.tpb>>>(2, (const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]); // to .176
+    Round<EDGES_B, EDGES_B/2><<<tp.trim.blocks, tp.trim.tpb>>>(1, (const uint2 *)bufferB, (uint2 *)bufferA, (const int *)indexesE, (int *)indexesE2); // to .296
+
     if (abort) return false;
-
-    cudaMemset(indexesE[0], 0, indexesSize);
-
-    Round<1, EDGES_A/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(3, (const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]); // to .117
+    cudaMemset(indexesE, 0, indexesSize);
+    Round<EDGES_B/2, EDGES_A/4><<<tp.trim.blocks, tp.trim.tpb>>>(2, (const uint2 *)bufferA, (uint2 *)bufferB, (const int *)indexesE2, (int *)indexesE); // to .176
     if (abort) return false;
+    cudaMemset(indexesE2, 0, indexesSize);
+    Round<EDGES_A/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(3, (const uint2 *)bufferB, (uint2 *)bufferA, (const int *)indexesE, (int *)indexesE2); // to .117
   
     cudaDeviceSynchronize();
   
     for (int round = 4; round < tp.ntrims; round += 2) {
-      cudaMemset(indexesE[1], 0, indexesSize);
-      Round<1, EDGES_B/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(round, (const uint2 *)bufferA, (uint2 *)bufferB, indexesE[0], indexesE[1]);
       if (abort) return false;
-      cudaMemset(indexesE[0], 0, indexesSize);
-      Round<1, EDGES_B/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(round+1, (const uint2 *)bufferB, (uint2 *)bufferA, indexesE[1], indexesE[0]);
+      cudaMemset(indexesE, 0, indexesSize);
+      Round<EDGES_B/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(round, (const uint2 *)bufferA, (uint2 *)bufferB, (const int *)indexesE2, (int *)indexesE);
       if (abort) return false;
+      cudaMemset(indexesE2, 0, indexesSize);
+      Round<EDGES_B/4, EDGES_B/4><<<tp.trim.blocks, tp.trim.tpb>>>(round+1, (const uint2 *)bufferB, (uint2 *)bufferA, (const int *)indexesE, (int *)indexesE2);
     }
     
-    cudaMemset(indexesE[1], 0, indexesSize);
+    if (abort) return false;
+    cudaMemset(indexesE, 0, indexesSize);
     cudaDeviceSynchronize();
   
-    Tail<EDGES_B/4><<<tp.tail.blocks, tp.tail.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, (const int *)indexesE[0], (int *)indexesE[1]);
-    cudaMemcpy(&nedges, indexesE[1], sizeof(u32), cudaMemcpyDeviceToHost);
+    Tail<EDGES_B/4><<<tp.tail.blocks, tp.tail.tpb>>>((const uint2 *)bufferA, (uint2 *)bufferB, (const int *)indexesE2, (int *)indexesE);
+    cudaMemcpy(&nedges, indexesE, sizeof(u32), cudaMemcpyDeviceToHost);
     cudaDeviceSynchronize();
     return nedges;
   }
@@ -594,9 +532,9 @@ struct solver_ctx {
       // print_log("\n");
       sols.resize(sols.size() + PROOFSIZE);
       cudaMemcpyToSymbol(recoveredges, soledges, sizeof(soledges));
-      cudaMemset(trimmer.indexesE[1], 0, trimmer.indexesSize);
-      Recovery<<<trimmer.tp.recover.blocks, trimmer.tp.recover.tpb>>>(*trimmer.dipkeys, (ulonglong4*)trimmer.bufferA, (int *)trimmer.indexesE[1]);
-      cudaMemcpy(&sols[sols.size()-PROOFSIZE], trimmer.indexesE[1], PROOFSIZE * sizeof(u32), cudaMemcpyDeviceToHost);
+      cudaMemset(trimmer.indexesE2, 0, trimmer.indexesSize);
+      Recovery<<<trimmer.tp.recover.blocks, trimmer.tp.recover.tpb>>>(*trimmer.dipkeys, trimmer.bufferA, (int *)trimmer.indexesE2);
+      cudaMemcpy(&sols[sols.size()-PROOFSIZE], trimmer.indexesE2, PROOFSIZE * sizeof(u32), cudaMemcpyDeviceToHost);
       checkCudaErrors(cudaDeviceSynchronize());
       qsort(&sols[sols.size()-PROOFSIZE], PROOFSIZE, sizeof(u32), cg.nonce_cmp);
     }
